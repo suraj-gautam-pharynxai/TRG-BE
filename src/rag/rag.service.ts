@@ -111,7 +111,12 @@ export class RagService {
       source ? [toSql(qEmbedding), k, source] : [toSql(qEmbedding), k],
     );
 
-    console.log({ rows })
+    if (rows.length === 0) {
+      const fallbackRows = await this.keywordFallbackSearch(question, k, source);
+      const contextTextFb = fallbackRows.map((r) => r.content).join('\n---\n');
+      const answerFb = await this.generateAnswer(question, contextTextFb);
+      return { answer: answerFb, contexts: fallbackRows.map((r) => ({ ...r, score: 0 })) };
+    }
 
     const contextText = rows.map((r) => r.content).join('\n---\n');
     const answer = await this.generateAnswer(question, contextText);
@@ -205,6 +210,58 @@ export class RagService {
       lines.push(headers.map((h) => String((row as any)[h] ?? '')).join(' | '));
     }
     return lines.join('\n');
+  }
+
+  private async keywordFallbackSearch(
+    question: string,
+    k: number,
+    source?: string,
+  ): Promise<Array<{ id: string; source: string; content: string }>> {
+    const normalized = question.toLowerCase();
+    const specialPhrases: string[] = [];
+    if (normalized.includes('nifty 50')) {
+      specialPhrases.push('nifty 50', 'nifty 50 (benchmark)');
+    }
+
+    const stopwords = new Set([
+      'what', 'is', 'the', 'of', 'for', 'a', 'an', 'and', 'or', 'to', 'me', 'data', 'give', 'provide', 'show', 'please', 'about'
+    ]);
+    const rawTokens = normalized
+      .replace(/[^a-z0-9()\s.-]/g, ' ')
+      .split(/\s+/)
+      .filter(Boolean)
+      .filter((t) => !stopwords.has(t))
+      .filter((t) => t.length >= 2);
+
+    // Build ILIKE conditions requiring all tokens to appear
+    const conditions: string[] = [];
+    const params: any[] = [];
+    let paramIndex = 1;
+
+    for (const token of rawTokens) {
+      conditions.push(`content ILIKE $${paramIndex++}`);
+      params.push(`%${token}%`);
+    }
+
+    for (const phrase of specialPhrases) {
+      conditions.push(`content ILIKE $${paramIndex++}`);
+      params.push(`%${phrase}%`);
+    }
+
+    let where = conditions.length ? conditions.join(' AND ') : '';
+    if (source) {
+      where = where ? `(${where}) AND source = $${paramIndex++}` : `source = $${paramIndex++}`;
+      params.push(source);
+    }
+
+    const sql = `SELECT id, source, content
+                 FROM dashboard_chunks
+                 ${where ? 'WHERE ' + where : ''}
+                 ORDER BY created_at DESC
+                 LIMIT ${k}`;
+
+    const { rows } = await this.db.query<{ id: string; source: string; content: string }>(sql, params);
+    return rows;
   }
 }
 
