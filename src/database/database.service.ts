@@ -6,7 +6,7 @@ import { Pool } from 'pg';
 export class DatabaseService implements OnModuleInit {
   private pool!: Pool;
 
-  constructor(private readonly configService: ConfigService) {}
+  constructor(private readonly configService: ConfigService) { }
 
   async onModuleInit(): Promise<void> {
     this.pool = new Pool({
@@ -41,28 +41,28 @@ export class DatabaseService implements OnModuleInit {
       );
     `);
 
-    // Check if graph_data table exists with old schema
-    const tableExists = await this.pool.query(`
-      SELECT EXISTS (
-        SELECT FROM information_schema.tables 
-        WHERE table_name = 'graph_data'
-      );
-    `);
+    // // Check if graph_data table exists with old schema
+    // const tableExists = await this.pool.query(`
+    //   SELECT EXISTS (
+    //     SELECT FROM information_schema.tables 
+    //     WHERE table_name = 'graph_data'
+    //   );
+    // `);
 
-    if (tableExists.rows[0].exists) {
-      // Check if old columns exist
-      const hasOldColumns = await this.pool.query(`
-        SELECT EXISTS (
-          SELECT FROM information_schema.columns 
-          WHERE table_name = 'graph_data' AND column_name = 'metric'
-        );
-      `);
+    // if (tableExists.rows[0].exists) {
+    //   // Check if old columns exist
+    //   const hasOldColumns = await this.pool.query(`
+    //     SELECT EXISTS (
+    //       SELECT FROM information_schema.columns 
+    //       WHERE table_name = 'graph_data' AND column_name = 'metric'
+    //     );
+    //   `);
 
-      if (hasOldColumns.rows[0].exists) {
-        // Drop old table and recreate with new schema
-        await this.pool.query('DROP TABLE graph_data CASCADE');
-      }
-    }
+    //   if (hasOldColumns.rows[0].exists) {
+    //     // Drop old table and recreate with new schema
+    //     await this.pool.query('DROP TABLE graph_data CASCADE');
+    //   }
+    // }
 
     await this.pool.query(`
       CREATE TABLE IF NOT EXISTS graph_data (
@@ -70,6 +70,15 @@ export class DatabaseService implements OnModuleInit {
         source TEXT NOT NULL,
         table_data JSONB NOT NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
+
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS chat_history (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      query TEXT NOT NULL,
+      response TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
       );
     `);
 

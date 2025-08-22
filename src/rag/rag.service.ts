@@ -53,7 +53,7 @@ export class RagService {
   async ingestFile(source: string, file: Express.Multer.File): Promise<{ inserted: number; graphDataInserted: number }> {
     // Delete old entries for this source
     await this.db.deleteBySource(source);
-    
+
     const mime = file.mimetype;
     const buf = file.buffer;
     // CSV
@@ -120,6 +120,7 @@ export class RagService {
 
     const contextText = rows.map((r) => r.content).join('\n---\n');
     const answer = await this.generateAnswer(question, contextText);
+    await this.saveChatHistory(question, answer)
     return { answer, contexts: rows };
   }
 
@@ -130,8 +131,6 @@ export class RagService {
     });
     return res.data[0].embedding as unknown as number[];
   }
-
-  // vision extraction removed per request
 
   private async generateAnswer(question: string, context: string): Promise<string> {
     const res = await this.openai.chat.completions.create({
@@ -179,7 +178,7 @@ export class RagService {
   }
 
   async getData(source?: string): Promise<{ data: Array<{ id: string; source: string; table_data: any; created_at: string }> }> {
-    const query = source 
+    const query = source
       ? 'SELECT * FROM graph_data WHERE source = $1 ORDER BY created_at DESC'
       : 'SELECT * FROM graph_data ORDER BY created_at DESC';
     const params = source ? [source] : [];
@@ -192,7 +191,7 @@ export class RagService {
     rows: Array<Record<string, unknown>>,
   ): Promise<number> {
     if (!rows || rows.length === 0) return 0;
-    
+
     // Store entire table data as JSONB
     await this.db.query(
       `INSERT INTO graph_data (source, table_data) VALUES ($1, $2)`,
@@ -261,7 +260,15 @@ export class RagService {
                  LIMIT ${k}`;
 
     const { rows } = await this.db.query<{ id: string; source: string; content: string }>(sql, params);
+    console.log({ rows })
     return rows;
+  }
+
+  private async saveChatHistory(query: string, response: string) {
+    await this.db.query(
+      `INSERT INTO chat_history (query, response) VALUES ($1, $2)`,
+      [query, response]
+    );
   }
 }
 
