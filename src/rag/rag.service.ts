@@ -270,6 +270,24 @@ export class RagService {
       [query, response]
     );
   }
+
+
+  async getChatHistory(page: number = 1, limit: number = 10) {
+    const offset = (page - 1) * limit;
+
+    const result = await this.db.query(
+      `SELECT id, query, response, created_at
+     FROM chat_history
+     ORDER BY created_at DESC
+     LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
+
+    return result.rows;
+  }
+
+
+
 }
 
 

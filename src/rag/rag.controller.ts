@@ -5,7 +5,7 @@ import * as multer from 'multer';
 
 @Controller('rag')
 export class RagController {
-  constructor(private readonly ragService: RagService) {}
+  constructor(private readonly ragService: RagService) { }
 
   @Get('query')
   async query(
@@ -28,6 +28,14 @@ export class RagController {
     @Query('source') source: string,
   ): Promise<{ inserted: number; graphDataInserted: number }> {
     return this.ragService.ingestFile(source ?? file.originalname, file);
+  }
+
+  @Get('chat-history')
+  async getChatHistory(
+    @Query('page') page: number = 1,
+    @Query('limit') limit: number = 10,
+  ) {
+    return this.ragService.getChatHistory(page, limit)
   }
 }
 
