@@ -104,23 +104,43 @@ export class RagService {
       score: number;
     }>(
       `SELECT id, source, content, 1 - (embedding <=> $1::vector) AS score
-       FROM dashboard_chunks
-       ${source ? 'WHERE source = $3' : ''}
-       ORDER BY embedding <=> $1::vector
-       LIMIT $2`,
+     FROM dashboard_chunks
+     ${source ? 'WHERE source = $3' : ''}
+     ORDER BY embedding <=> $1::vector
+     LIMIT $2`,
       source ? [toSql(qEmbedding), k, source] : [toSql(qEmbedding), k],
     );
 
+    // If no semantic matches, fallback to keyword search
     if (rows.length === 0) {
       const fallbackRows = await this.keywordFallbackSearch(question, k, source);
       const contextTextFb = fallbackRows.map((r) => r.content).join('\n---\n');
-      const answerFb = await this.generateAnswer(question, contextTextFb);
+
+      // also include chat history
+      const chatHistory = await this.getChatHistory(1, 3);
+      const historyContext = chatHistory
+        .map((h: any) => `Q: ${h.query}\nA: ${h.response}`)
+        .join("\n---\n");
+
+      const answerFb = await this.generateAnswer(question, `${historyContext}\n---\n${contextTextFb}`);
+      await this.saveChatHistory(question, answerFb);
+
       return { answer: answerFb, contexts: fallbackRows.map((r) => ({ ...r, score: 0 })) };
     }
 
     const contextText = rows.map((r) => r.content).join('\n---\n');
-    const answer = await this.generateAnswer(question, contextText);
-    await this.saveChatHistory(question, answer)
+
+    // fetch last 3 query-response pairs
+    const chatHistory = await this.getChatHistory(1, 3);
+    const historyContext = chatHistory
+      .map((h: any) => `Q: ${h.query}\nA: ${h.response}`)
+      .join("\n---\n");
+
+    // include history in context
+    const answer = await this.generateAnswer(question, `${historyContext}\n---\n${contextText}`);
+
+    await this.saveChatHistory(question, answer);
+
     return { answer, contexts: rows };
   }
 
@@ -139,7 +159,7 @@ export class RagService {
         {
           role: 'system',
           content:
-            'You are a data analyst. Answer based ONLY on the provided context from company dashboard. If uncertain, say you do not know.',
+            'You are a data analyst. Use both the chat history and the provided context from company dashboard. If uncertain, say you do not know.',
         },
         { role: 'user', content: `Context:\n${context}\n\nQuestion: ${question}` },
       ],
