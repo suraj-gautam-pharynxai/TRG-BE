@@ -34,6 +34,7 @@ export class DatabaseService implements OnModuleInit {
     await this.pool.query(`
       CREATE TABLE IF NOT EXISTS dashboard_chunks (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        title TEXT NOT NULL DEFAULT '',
         source TEXT NOT NULL,
         content TEXT NOT NULL,
         embedding vector(1536) NOT NULL,
@@ -67,6 +68,7 @@ export class DatabaseService implements OnModuleInit {
     await this.pool.query(`
       CREATE TABLE IF NOT EXISTS graph_data (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        title TEXT NOT NULL DEFAULT '',
         source TEXT NOT NULL,
         table_data JSONB NOT NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT now()

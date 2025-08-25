@@ -52,7 +52,7 @@ export class RagService {
 
   async ingestFile(source: string, file: Express.Multer.File): Promise<{ inserted: number; graphDataInserted: number }> {
     // Delete old entries for this source
-    await this.db.deleteBySource(source);
+    // await this.db.deleteBySource(source);
 
     const mime = file.mimetype;
     const buf = file.buffer;
@@ -110,6 +110,9 @@ export class RagService {
      LIMIT $2`,
       source ? [toSql(qEmbedding), k, source] : [toSql(qEmbedding), k],
     );
+
+
+    console.log({ rows })
 
     // If no semantic matches, fallback to keyword search
     if (rows.length === 0) {
@@ -177,25 +180,66 @@ export class RagService {
     return 1;
   }
 
+  // private async ingestRows(
+  //   source: string,
+  //   rows: Array<Record<string, unknown>>,
+  //   prefix?: string,
+  // ): Promise<number> {
+  //   if (!rows || rows.length === 0) return 0;
+  //   const headers = Object.keys(rows[0]);
+  //   let inserted = 0;
+  //   for (const row of rows) {
+  //     const parts: string[] = [];
+  //     for (const h of headers) {
+  //       const value = (row as any)[h];
+  //       parts.push(`${h}: ${String(value)}`);
+  //     }
+  //     const content = (prefix ? `${prefix} \n` : '') + parts.join('; ');
+  //     inserted += await this.insertChunk(source, content);
+  //   }
+  //   return inserted;
+  // }
+
+
   private async ingestRows(
     source: string,
     rows: Array<Record<string, unknown>>,
     prefix?: string,
   ): Promise<number> {
     if (!rows || rows.length === 0) return 0;
+
     const headers = Object.keys(rows[0]);
     let inserted = 0;
-    for (const row of rows) {
-      const parts: string[] = [];
-      for (const h of headers) {
-        const value = (row as any)[h];
-        parts.push(`${h}: ${String(value)}`);
-      }
-      const content = (prefix ? `${prefix} \n` : '') + parts.join('; ');
-      inserted += await this.insertChunk(source, content);
+
+    // ✅ Whole sheet as one chunk
+    {
+      const sheetParts = rows.map((row) =>
+        headers.map((h) => `${h}: ${String((row as any)[h])}`).join('; ')
+      );
+      const sheetContent = (prefix ? `${prefix}\n` : '') + sheetParts.join('\n');
+      inserted += await this.insertChunk(source, sheetContent);
     }
+
+    // ✅ Each row as one chunk (keeps relationships intact)
+    for (const row of rows) {
+      const rowParts = headers.map((h) => `${h}: ${String((row as any)[h])}`);
+      const rowContent = (prefix ? `${prefix}\n` : '') + rowParts.join('; ');
+      inserted += await this.insertChunk(source, rowContent);
+    }
+
+    // ✅ Each column as one chunk (for trend/summary queries)
+    for (const h of headers) {
+      const values = rows.map((r) => String((r as any)[h] ?? ''));
+      const colContent =
+        (prefix ? `${prefix}\n` : '') + `Column: ${h}\n` + values.join('\n');
+      inserted += await this.insertChunk(source, colContent);
+    }
+
     return inserted;
   }
+
+
+
 
   async getData(source?: string): Promise<{ data: Array<{ id: string; source: string; table_data: any; created_at: string }> }> {
     const query = source
@@ -291,7 +335,6 @@ export class RagService {
     );
   }
 
-
   async getChatHistory(page: number = 1, limit: number = 10) {
     const offset = (page - 1) * limit;
 
@@ -305,9 +348,6 @@ export class RagService {
 
     return result.rows;
   }
-
-
-
 }
 
 
