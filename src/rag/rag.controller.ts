@@ -11,9 +11,8 @@ export class RagController {
   async query(
     @Query('q') question: string,
     @Query('k') k: string = '5',
-    @Query('source') source?: string,
-  ): Promise<{ answer: string; contexts: Array<{ id: string; source: string; content: string; score: number }> }> {
-    return this.ragService.query(question, Number(k), source);
+  ) {
+    return this.ragService.query(question, Number(k));
   }
 
   @Get('data')

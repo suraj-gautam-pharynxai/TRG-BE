@@ -92,46 +92,49 @@ export class RagService {
     return { inserted: result.inserted, graphDataInserted: 0 };
   }
 
-  async query(question: string, k = 5, source?: string): Promise<{
+  async query(question: string, k = 5): Promise<{
     answer: string;
-    contexts: Array<{ id: string; source: string; content: string; score: number }>;
+    contexts: Array<{ id: string; content: string; score: number }>;
   }> {
     const qEmbedding = await this.createEmbedding(question);
-    const { rows } = await this.db.query<{
+    console.log({})
+    // 🔹 Step 1: Semantic search
+    const { rows: semanticRows } = await this.db.query<{
       id: string;
-      source: string;
       content: string;
       score: number;
     }>(
-      `SELECT id, source, content, 1 - (embedding <=> $1::vector) AS score
-     FROM dashboard_chunks
-     ${source ? 'WHERE source = $3' : ''}
-     ORDER BY embedding <=> $1::vector
-     LIMIT $2`,
-      source ? [toSql(qEmbedding), k, source] : [toSql(qEmbedding), k],
+      `SELECT id, content, 1 - (embedding <=> $1::vector) AS score
+   FROM dashboard_chunks
+   ORDER BY score DESC
+   LIMIT $2`,
+      [toSql(qEmbedding), 5],
     );
 
 
-    console.log({ rows })
+    console.log({ semanticRows });
 
-    // If no semantic matches, fallback to keyword search
-    if (rows.length === 0) {
-      const fallbackRows = await this.keywordFallbackSearch(question, k, source);
-      const contextTextFb = fallbackRows.map((r) => r.content).join('\n---\n');
+    // 🔹 Step 2: Keyword fallback (always run if the Q has tokens like "AEUUU")
+    const keywordRows = await this.keywordFallbackSearch(question, k);
+    console.log({ keywordRows });
 
-      // also include chat history
-      const chatHistory = await this.getChatHistory(1, 3);
-      const historyContext = chatHistory
-        .map((h: any) => `Q: ${h.query}\nA: ${h.response}`)
-        .join("\n---\n");
-
-      const answerFb = await this.generateAnswer(question, `${historyContext}\n---\n${contextTextFb}`);
-      await this.saveChatHistory(question, answerFb);
-
-      return { answer: answerFb, contexts: fallbackRows.map((r) => ({ ...r, score: 0 })) };
+    // 🔹 Step 3: Merge both sets (avoid duplicates)
+    const combinedMap = new Map<string, { id: string; content: string; score: number }>();
+    for (const row of semanticRows) combinedMap.set(row.id, row);
+    for (const row of keywordRows) {
+      if (!combinedMap.has(row.id)) {
+        combinedMap.set(row.id, { ...row, score: 0.75 }); // give keyword hits medium score
+      }
     }
 
-    const contextText = rows.map((r) => r.content).join('\n---\n');
+    const finalRows = Array.from(combinedMap.values())
+      .sort((a, b) => b.score - a.score)
+      .slice(0, k);
+
+    console.log({ finalRows });
+
+    // 🔹 Step 4: Build context
+    const contextText = finalRows.map((r) => r.content).join('\n---\n');
 
     // fetch last 3 query-response pairs
     const chatHistory = await this.getChatHistory(1, 3);
@@ -139,17 +142,17 @@ export class RagService {
       .map((h: any) => `Q: ${h.query}\nA: ${h.response}`)
       .join("\n---\n");
 
-    // include history in context
+    // 🔹 Step 5: Generate answer
     const answer = await this.generateAnswer(question, `${historyContext}\n---\n${contextText}`);
 
     await this.saveChatHistory(question, answer);
 
-    return { answer, contexts: rows };
+    return { answer, contexts: finalRows };
   }
 
   private async createEmbedding(input: string): Promise<number[]> {
     const res = await this.openai.embeddings.create({
-      model: 'text-embedding-3-small',
+      model: 'text-embedding-ada-002',
       input,
     });
     return res.data[0].embedding as unknown as number[];
@@ -221,11 +224,11 @@ export class RagService {
     }
 
     // ✅ Each row as one chunk (keeps relationships intact)
-    for (const row of rows) {
-      const rowParts = headers.map((h) => `${h}: ${String((row as any)[h])}`);
-      const rowContent = (prefix ? `${prefix}\n` : '') + rowParts.join('; ');
-      inserted += await this.insertChunk(source, rowContent);
-    }
+    // for (const row of rows) {
+    //   const rowParts = headers.map((h) => `${h}: ${String((row as any)[h])}`);
+    //   const rowContent = (prefix ? `${prefix}\n` : '') + rowParts.join('; ');
+    //   inserted += await this.insertChunk(source, rowContent);
+    // }
 
     // ✅ Each column as one chunk (for trend/summary queries)
     for (const h of headers) {
@@ -278,14 +281,10 @@ export class RagService {
   private async keywordFallbackSearch(
     question: string,
     k: number,
-    source?: string,
-  ): Promise<Array<{ id: string; source: string; content: string }>> {
+  ): Promise<Array<{ id: string; content: string }>> {
     const normalized = question.toLowerCase();
-    const specialPhrases: string[] = [];
-    if (normalized.includes('nifty 50')) {
-      specialPhrases.push('nifty 50', 'nifty 50 (benchmark)');
-    }
 
+    // tokenize question
     const stopwords = new Set([
       'what', 'is', 'the', 'of', 'for', 'a', 'an', 'and', 'or', 'to', 'me', 'data', 'give', 'provide', 'show', 'please', 'about'
     ]);
@@ -296,7 +295,7 @@ export class RagService {
       .filter((t) => !stopwords.has(t))
       .filter((t) => t.length >= 2);
 
-    // Build ILIKE conditions requiring all tokens to appear
+    // Build ILIKE conditions
     const conditions: string[] = [];
     const params: any[] = [];
     let paramIndex = 1;
@@ -306,25 +305,15 @@ export class RagService {
       params.push(`%${token}%`);
     }
 
-    for (const phrase of specialPhrases) {
-      conditions.push(`content ILIKE $${paramIndex++}`);
-      params.push(`%${phrase}%`);
-    }
+    const where = conditions.length ? conditions.join(' AND ') : '';
 
-    let where = conditions.length ? conditions.join(' AND ') : '';
-    if (source) {
-      where = where ? `(${where}) AND source = $${paramIndex++}` : `source = $${paramIndex++}`;
-      params.push(source);
-    }
+    const sql = `SELECT id, content
+               FROM dashboard_chunks
+               ${where ? 'WHERE ' + where : ''}
+               ORDER BY created_at DESC
+               LIMIT ${k}`;
 
-    const sql = `SELECT id, source, content
-                 FROM dashboard_chunks
-                 ${where ? 'WHERE ' + where : ''}
-                 ORDER BY created_at DESC
-                 LIMIT ${k}`;
-
-    const { rows } = await this.db.query<{ id: string; source: string; content: string }>(sql, params);
-    console.log({ rows })
+    const { rows } = await this.db.query<{ id: string; content: string }>(sql, params);
     return rows;
   }
 
@@ -351,3 +340,86 @@ export class RagService {
 }
 
 
+
+
+{
+  finalRows: [
+    {
+      id: 'c300f707-122c-42e7-8df1-f97ca144b9bb',
+      content: 'Column: Sum of Risk Contribution\n' +
+        '30.80%\n' +
+        '11.80%\n' +
+        '10.00%\n' +
+        '7.00%\n' +
+        '6.50%\n' +
+        '5.60%\n' +
+        '5.40%\n' +
+        '4.80%\n' +
+        '3.90%\n' +
+        '3.20%\n' +
+        '2.10%\n' +
+        '1.60%\n' +
+        '1.40%\n' +
+        '1.40%\n' +
+        '1.40%\n' +
+        '1.10%\n' +
+        '0.90%\n' +
+        '0.70%\n' +
+        '0.30%\n' +
+        '0.00%\n' +
+        '99.90%',
+      score: 0.8255897268301426
+    },
+    {
+      id: 'd841982a-1524-43f0-80d5-0f228c191d7a',
+      content: 'Securities: AEUUU; Sum of Risk Contribution: 30.80%\n' +
+        'Securities: NUHGZ; Sum of Risk Contribution: 11.80%\n' +
+        'Securities: CSTNL; Sum of Risk Contribution: 10.00%\n' +
+        'Securities: SSDRF; Sum of Risk Contribution: 7.00%\n' +
+        'Securities: JPMMZ; Sum of Risk Contribution: 6.50%\n' +
+        'Securities: AGACZ; Sum of Risk Contribution: 5.60%\n' +
+        'Securities: MFMER; Sum of Risk Contribution: 5.40%\n' +
+        'Securities: TIESI; Sum of Risk Contribution: 4.80%\n' +
+        'Securities: SCHHH; Sum of Risk Contribution: 3.90%\n' +
+        'Securities: IHHSF; Sum of Risk Contribution: 3.20%\n' +
+        'Securities: MOTTZ; Sum of Risk Contribution: 2.10%\n' +
+        'Securities: CACCZ; Sum of Risk Contribution: 1.60%\n' +
+        'Securities: LODUT; Sum of Risk Contribution: 1.40%\n' +
+        'Securities: ISHVF; Sum of Risk Contribution: 1.40%\n' +
+        'Securities: PGLAZ; Sum of Risk Contribution: 1.40%\n' +
+        'Securities: IMSCF; Sum of Risk Contribution: 1.10%\n' +
+        'Securities: LODEZ; Sum of Risk Contribution: 0.90%\n' +
+        'Securities: EUEIC; Sum of Risk Contribution: 0.70%\n' +
+        'Securities: LOMIZ; Sum of Risk Contribution: 0.30%\n' +
+        'Securities: USD.CCY; Sum of Risk Contribution: 0.00%\n' +
+        'Securities: Grand Total; Sum of Risk Contribution: 99.90%',
+      score: 0.8001854538807016
+    },
+    {
+      id: 'b239c015-ccb7-490a-b392-1cc73ef1bf7a',
+      content: 'Column: Securities\n' +
+        'AEUUU\n' +
+        'NUHGZ\n' +
+        'CSTNL\n' +
+        'SSDRF\n' +
+        'JPMMZ\n' +
+        'AGACZ\n' +
+        'MFMER\n' +
+        'TIESI\n' +
+        'SCHHH\n' +
+        'IHHSF\n' +
+        'MOTTZ\n' +
+        'CACCZ\n' +
+        'LODUT\n' +
+        'ISHVF\n' +
+        'PGLAZ\n' +
+        'IMSCF\n' +
+        'LODEZ\n' +
+        'EUEIC\n' +
+        'LOMIZ\n' +
+        'USD.CCY\n' +
+        'Grand Total',
+      score: 0.7389190417206084
+    }
+  ]
+}
